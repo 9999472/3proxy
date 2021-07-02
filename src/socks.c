@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -173,9 +173,9 @@ void * sockschild(struct clientparam* param) {
 	case 3:
 
 #ifndef NOIPV6	 
-	 param->sinsl = *SAFAMILY(&param->req)==AF_INET6? param->srv->extsa6 : param->srv->extsa;
+	 param->sinsl = *SAFAMILY(&param->req)==AF_INET6? param->srv->extsa6 : (SAISNULL(&param->srv->extNat)?param->srv->extsa:param->srv->extNat);
 #else
-	 param->sinsl = param->srv->extsa;
+	 param->sinsl = SAISNULL(&param->srv->extNat)?param->srv->extsa:param->srv->extNat;
 #endif
 	 if ((param->remsock=so._socket(SASOCK(&param->req), command == 2? SOCK_STREAM:SOCK_DGRAM, command == 2?IPPROTO_TCP:IPPROTO_UDP)) == INVALID_SOCKET) {RETURN (11);}
 	 param->operation = command == 2?BIND:UDPASSOC;
@@ -208,7 +208,7 @@ void * sockschild(struct clientparam* param) {
 		*SAPORT(&param->sinsl) = 0;
 		if(so._bind(param->remsock,(struct sockaddr *)&param->sinsl,SASIZE(&param->sinsl)))RETURN (12);
 #if SOCKSTRACE > 0
-fprintf(stderr, "%hu binded to communicate with server\n", *SAPORT(&param->sins));
+fprintf(stderr, "%hu bound to communicate with server\n", *SAPORT(&param->sins));
 fflush(stderr);
 #endif
 	}
@@ -237,7 +237,7 @@ CLEANRET:
 	int repcode;
 
 	sasize = sizeof(sin);
-	if(command != 3) so._getsockname(param->remsock, (struct sockaddr *)&sin,  &sasize);
+	if(command != 3 && param->remsock != INVALID_SOCKET) so._getsockname(param->remsock, (struct sockaddr *)&sin,  &sasize);
 	else so._getsockname(param->clisock, (struct sockaddr *)&sin,  &sasize);
 #if SOCKSTRACE > 0
 fprintf(stderr, "Sending confirmation to client with code %d for %s with %s:%hu\n",
@@ -279,7 +279,7 @@ fflush(stderr);
 					if(buf)myfree(buf);
 					return (*param->redirectfunc)(param);
 				}
-				param->res = sockmap(param, conf.timeouts[CONNECTION_L]);
+				param->res = mapsocket(param, conf.timeouts[CONNECTION_L]);
 				break;
 			case 2:
 				so._listen (param->remsock, 1);
@@ -325,12 +325,13 @@ fflush(stderr);
 					socksend(param->clisock, buf, 8, conf.timeouts[STRING_S]);
 				}
 
-				param->res = sockmap(param, conf.timeouts[CONNECTION_S]);
+				param->res = mapsocket(param, conf.timeouts[CONNECTION_S]);
 				break;
 			case 3:
 				param->sinsr = param->req;
 				myfree(buf);
 				if(!(buf = myalloc(LARGEBUFSIZE))) {RETURN(21);}
+				sin = param->sincr;
 
 				for(;;){
 					fds[0].fd = param->remsock;
@@ -387,10 +388,7 @@ fflush(stderr);
 
 						sasize = sizeof(param->sinsr);
 						if(len > (int)i){
-							if(socksendto(param->remsock, (struct sockaddr *)&param->sinsr, buf+i, len - i, conf.timeouts[SINGLEBYTE_L]*1000) <= 0){
-								param->res = 467;
-								break;
-							}
+							socksendto(param->remsock, (struct sockaddr *)&param->sinsr, buf+i, len - i, conf.timeouts[SINGLEBYTE_L]*1000);
 							param->statscli64+=(len - i);
 							param->nwrites++;
 #if SOCKSTRACE > 1
@@ -413,7 +411,7 @@ fflush(stderr);
 						sasize = sizeof(param->sinsr);
 						buf[0]=buf[1]=buf[2]=0;
 						buf[3]=(*SAFAMILY(&param->sinsl) == AF_INET)?1:4;
-						if((len = so._recvfrom(param->remsock, (char *)buf+6+SAADDRLEN(&param->sinsl), 65535 - 10, 0, (struct sockaddr *)&param->sinsr, &sasize)) <= 0) {
+						if((len = so._recvfrom(param->remsock, (char *)buf+6+SAADDRLEN(&param->sinsl), 65535 - (6+SAADDRLEN(&param->sinsl)), 0, (struct sockaddr *)&param->sinsr, &sasize)) <= 0) {
 							param->res = 468;
 							break;
 						}
@@ -422,10 +420,7 @@ fflush(stderr);
 						memcpy(buf+4, SAADDR(&param->sinsr), SAADDRLEN(&param->sinsr));
 						memcpy(buf+4+SAADDRLEN(&param->sinsr), SAPORT(&param->sinsr), 2);
 						sasize = sizeof(sin);
-						if(socksendto(param->clisock, (struct sockaddr *)&sin, buf, len + 6 + SAADDRLEN(&param->sinsr), conf.timeouts[SINGLEBYTE_L]*1000) <=0){
-							param->res = 469;
-							break;
-						}
+						socksendto(param->clisock, (struct sockaddr *)&sin, buf, len + 6 + SAADDRLEN(&param->sinsr), conf.timeouts[SINGLEBYTE_L]*1000);
 #if SOCKSTRACE > 1
 fprintf(stderr, "UDP packet relayed to client from %hu size %d\n",
 			ntohs(*SAPORT(&param->sinsr)),
@@ -453,7 +448,7 @@ fflush(stderr);
 	 else 
 		myinet_ntop(*SAFAMILY(&param->req), SAADDR(&param->req), (char *)buf + strlen((char *)buf), 64);
          sprintf((char *)buf+strlen((char *)buf), ":%hu", ntohs(*SAPORT(&param->req)));
-	 (*param->srv->logfunc)(param, buf);
+	 dolog(param, buf);
 	 myfree(buf);
  }
  freeparam(param);
@@ -466,7 +461,7 @@ struct proxydef childdef = {
 	1080,
 	0,
 	S_SOCKS,
-	""
+	"-N(EXTERNAL_IP) External NAT address to report to client for BIND\n"
 };
 #include "proxymain.c"
 #endif

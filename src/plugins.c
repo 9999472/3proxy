@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -68,16 +68,12 @@ struct symbol symbols[] = {
 	{symbols+41, "admin", (void *) adminchild},
 	{symbols+42, "ftppr", (void *) ftpprchild},
 	{symbols+43, "smtpp", (void *) smtppchild},
-	{symbols+44, "icqpr", (void *) icqprchild},
-/*
-	{symbols+45, "msnpr", (void *) msnprchild},
-*/
-	{symbols+45, "authfuncs", (void *) &authfuncs},
-	{symbols+46, "commandhandlers", (void *) &commandhandlers},
-	{symbols+47, "decodeurl", (void *) decodeurl},
-	{symbols+48, "parsestr", (void *) parsestr},
-	{symbols+49, "make_ace", (void *) make_ace},
-	{symbols+50, "freeacl", (void *) freeacl},
+	{symbols+44, "authfuncs", (void *) &authfuncs},
+	{symbols+45, "commandhandlers", (void *) &commandhandlers},
+	{symbols+46, "decodeurl", (void *) decodeurl},
+	{symbols+47, "parsestr", (void *) parsestr},
+	{symbols+48, "make_ace", (void *) make_ace},
+	{symbols+49, "freeacl", (void *) freeacl},
 	{NULL, "", NULL}
 };
 

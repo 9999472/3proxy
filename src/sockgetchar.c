@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 */
@@ -156,15 +156,11 @@ int sockgetcharsrv(struct clientparam * param, int timeosec, int timeousec){
 int sockgetlinebuf(struct clientparam * param, DIRECTION which, unsigned char * buf, int bufsize, int delim, int to){
  int c;
  int i=0;
- if(bufsize<2) return 0;
- c = (which)?sockgetcharsrv(param, to, 0):sockgetcharcli(param, to, 0);
- if (c == EOF) {
-	return 0;
- }
- do {
+
+ while(i < bufsize && (c = (which)?sockgetcharsrv(param, to, 0):sockgetcharcli(param, to, 0)) != EOF){
 	buf[i++] = c;
 	if(delim != EOF && c == delim) break;
- }while(i < bufsize && (c = (which)?sockgetcharsrv(param, to, 0):sockgetcharcli(param, to, 0)) != EOF);
+ }
  return i;
 }
 

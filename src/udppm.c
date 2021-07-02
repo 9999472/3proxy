@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -38,7 +38,7 @@ void * udppmchild(struct clientparam* param) {
  struct pollfd fds[256];
 
 
- if(!param->hostname)parsehostname((char *)param->srv->target, param, ntohs(param->srv->targetport));
+ if(!param->hostname && parsehostname((char *)param->srv->target, param, ntohs(param->srv->targetport))) RETURN(100);
  if (SAISNULL(&param->req)) {
 	param->srv->fds.events = POLLIN;
 	RETURN (100);
@@ -81,7 +81,7 @@ void * udppmchild(struct clientparam* param) {
 #ifdef _WIN32
 	ioctlsocket(param->remsock, FIONBIO, &ul);
 #else
-	fcntl(param->remsock,F_SETFL,O_NONBLOCK);
+	fcntl(param->remsock,F_SETFL,O_NONBLOCK | fcntl(param->remsock,F_GETFL));
 #endif
  memcpy(&param->sinsr, &param->req, sizeof(param->req));
 
@@ -91,7 +91,7 @@ void * udppmchild(struct clientparam* param) {
 	param->srv->fds.events = POLLIN;
  }
 
- param->res = sockmap(param, conf.timeouts[(param->srv->singlepacket)?SINGLEBYTE_L:STRING_L]);
+ param->res = mapsocket(param, conf.timeouts[(param->srv->singlepacket)?SINGLEBYTE_L:STRING_L]);
  if(!param->srv->singlepacket) {
 	param->srv->fds.events = POLLIN;
  }
@@ -99,7 +99,7 @@ void * udppmchild(struct clientparam* param) {
 CLEANRET:
 
  if(buf)myfree(buf);
- (*param->srv->logfunc)(param, NULL);
+ dolog(param, NULL);
 #ifndef _WIN32
  param->clisock = INVALID_SOCKET;
 #endif

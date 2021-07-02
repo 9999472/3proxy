@@ -1,3 +1,11 @@
+/*
+   3APA3A simpliest proxy server
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
+
+   please read License Agreement
+
+*/
+
 #ifndef _STRUCTURES_H_
 #define _STRUCTURES_H_
 
@@ -6,11 +14,9 @@
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#ifndef NOPSTDINT
-#include "pstdint.h"
-#else
-typedef unsigned long uint64_t
-#define PRINTF_INT64_MODIFIER "l"
+#include <stdint.h>
+#ifndef PRINTF_INT64_MODIFIER
+#define PRINTF_INT64_MODIFIER "ll"
 #endif
 #ifdef  __cplusplus
 extern "C" {
@@ -20,12 +26,29 @@ extern "C" {
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/ip.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <pthread.h>
 #define SASIZETYPE socklen_t
 #define SOCKET int
 #define INVALID_SOCKET  (-1)
+#ifdef WITH_LINUX_FUTEX
+#define _GNU_SOURCE
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <linux/kernel.h>
+#include <linux/futex.h>
+#define pthread_mutex_t int
+#define pthread_mutex_init(x, y) (*(x)=0)
+#define pthread_mutex_destroy(x) (*(x)=0)
+#define pthread_mutex_lock(x) mutex_lock(x)
+#define pthread_mutex_unlock(x) mutex_unlock(x)
+int mutex_lock(int *val);
+int mutex_unlock(int *val);
+#else
+#endif
 #else
 #include <winsock2.h>
 #include <Ws2tcpip.h>
@@ -42,6 +65,11 @@ extern "C" {
 
 #ifdef WITH_POLL
 #include <poll.h>
+#else
+#ifdef WITH_WSAPOLL
+
+#define poll(A,B,C) WSAPoll(A,B,C)
+
 #else
 struct mypollfd {
  SOCKET    fd;       /* file descriptor */
@@ -72,7 +100,7 @@ int
 #ifndef POLLNVAL
 #define POLLNVAL 32
 #endif
-
+#endif
 #endif
 
 
@@ -87,6 +115,8 @@ int
 #define NOCOUNTOUT	8
 #define CONNLIM		9
 #define NOCONNLIM	10
+#define COUNTALL	11
+#define NOCOUNTALL	12
 
 #define CONNECT 	0x00000001
 #define BIND		0x00000002
@@ -106,8 +136,6 @@ int
 #define FTP_DATA	0x00080000
 #define FTP		0x000F0000
 #define DNSRESOLVE	0x00100000
-#define IM_ICQ		0x00200000
-#define IM_MSN		0x00400000
 #define ADMIN		0x01000000
 
 
@@ -150,12 +178,8 @@ typedef enum {
 	S_DNSPR,
 	S_FTPPR,
 	S_SMTPP,
-	S_ICQPR,
 	S_REVLI,
 	S_REVCO,
-/*
-	S_MSNPR,
-*/
 	S_ZOMBIE
 }PROXYSERVICE;
 
@@ -251,7 +275,6 @@ typedef enum {
 	R_SOCKS4B,
 	R_SOCKS5B,
 	R_ADMIN,
-	R_ICQ,
 	R_EXTIP
 } REDIRTYPE;
 
@@ -263,9 +286,11 @@ struct chain {
 #else
 	struct sockaddr_in addr;
 #endif
-	unsigned short weight;
+	unsigned char * exthost;
 	unsigned char * extuser;
 	unsigned char * extpass;
+	unsigned short weight;
+	unsigned short cidr;
 };
 
 struct period {
@@ -301,10 +326,20 @@ struct ace {
 struct bandlim {
 	struct bandlim *next;
 	struct ace *ace;
-	unsigned basetime;
-	unsigned rate;
+	time_t basetime;
 	unsigned nexttime;
+	unsigned rate;
 };
+
+struct connlim {
+	struct connlim *next;
+	struct ace *ace;
+	time_t basetime;
+	uint64_t rating;
+	unsigned period;
+	unsigned rate;
+};
+
 
 typedef enum {NONE, MINUTELY, HOURLY, DAILY, WEEKLY, MONTHLY, ANNUALLY, NEVER} ROTATION;
 
@@ -400,20 +435,31 @@ struct srvparam {
 	int family;
 	int stacksize;
 	int noforce;
+	int anonymous;
+	int clisockopts, srvsockopts, lissockopts, cbcsockopts, cbssockopts;
+#ifdef WITHSPLICE
+	int usesplice;
+#endif
 	unsigned bufsize;
 	unsigned logdumpsrv, logdumpcli;
 #ifndef NOIPV6
 	struct sockaddr_in6 intsa;
 	struct sockaddr_in6 extsa6;
 	struct sockaddr_in6 extsa;
+	struct sockaddr_in6 extNat;
 #else
 	struct sockaddr_in intsa;
 	struct sockaddr_in extsa;
+	struct sockaddr_in extNat;
 #endif
 	pthread_mutex_t counter_mutex;
 	struct pollfd fds;
 	FILE *stdlog;
 	unsigned char * target;
+#ifdef SO_BINDTODEVICE
+	char * ibindtodevice;
+	char * obindtodevice;
+#endif
 	struct auth *authenticate;
 	struct pollfd * srvfds;
 	struct ace *acl;
@@ -451,7 +497,8 @@ struct clientparam {
 	REDIRTYPE redirtype;
 
 	uint64_t	waitclient64,
-			waitserver64;
+			waitserver64,
+			cycles;
 
 	int	redirected,
 		operation,
@@ -517,14 +564,16 @@ struct filemon {
 
 
 struct extparam {
-	int timeouts[10];
+	int timeouts[12];
 	struct ace * acl;
 	char * conffile;
 	struct bandlim * bandlimiter,  *bandlimiterout;
+	struct connlim * connlimiter;
 	struct trafcount * trafcounter;
 	struct srvparam *services;
-	int stacksize, threadinit, counterd, haveerror, rotate, paused, archiverc,
-		demon, maxchild, singlepacket, needreload, timetoexit, version, noforce;
+	int stacksize,
+		threadinit, counterd, haveerror, rotate, paused, archiverc,
+		demon, maxchild, needreload, timetoexit, version, noforce, bandlimver, parentretries;
 	int authcachetype, authcachetime;
 	int filtermaxsize;
 	unsigned char *logname, **archiver;
@@ -692,7 +741,7 @@ struct pluginlink {
 	int (*dobuf2)(struct clientparam * param, unsigned char * buf, const unsigned char *s, const unsigned char * doublec, struct tm* tm, char * format);
 	int (*scanaddr)(const unsigned char *s, unsigned long * ip, unsigned long * mask);
 	unsigned long (*getip46)(int family, unsigned char *name,  struct sockaddr *sa);
-	int (*sockmap)(struct clientparam * param, int timeo);
+	int (*sockmap)(struct clientparam * param, int timeo, int usesplice);
 	int (*ACLMatches)(struct ace* acentry, struct clientparam * param);
 	int (*alwaysauth)(struct clientparam * param);
 	int (*checkACL)(struct clientparam * param);
@@ -705,10 +754,10 @@ struct pluginlink {
 	void (*decodeurl)(unsigned char *s, int allowcr);
 	int (*parsestr) (unsigned char *str, unsigned char **argm, int nitems, unsigned char ** buff, int *inbuf, int *bufsize);
 	struct ace * (*make_ace) (int argc, unsigned char ** argv);
-	void * (*myalloc)(size_t size);
-	void (*myfree)(void *ptr);
-	void *(*myrealloc)(void *ptr, size_t size);
-	char * (*mystrdup)(const char *str);
+	void * (*mallocfunc)(size_t size);
+	void (*freefunc)(void *ptr);
+	void *(*reallocfunc)(void *ptr, size_t size);
+	char * (*strdupfunc)(const char *str);
 	TRAFCOUNTFUNC trafcountfunc;
 	char ** proxy_table;
 	struct schedule ** schedule;
@@ -746,7 +795,9 @@ typedef enum {
 	CONNECTION_S,
 	CONNECTION_L,
 	DNS_TO,
-	CHAIN_TO
+	CHAIN_TO,
+	CONNECT_TO,
+	CONNBACK_TO
 }TIMEOUT;
 
 typedef enum {

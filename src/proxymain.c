@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -8,36 +8,50 @@
 
 #include "proxy.h"
 
-pthread_mutex_t log_mutex;
-
 #define param ((struct clientparam *) p)
 #ifdef _WIN32
 DWORD WINAPI threadfunc(LPVOID p) {
 #else
 void * threadfunc (void *p) {
 #endif
- int i = 0;
+ int i = -1;
  if(param->srv->cbsock != INVALID_SOCKET){
 	SASIZETYPE size = sizeof(param->sinsr);
-	for(i=0; i<3; i++){
+	struct pollfd fds;
+	fds.fd = param->srv->cbsock;
+	fds.events = POLLIN;
+	fds.revents = 0;
+	for(i=5+(param->srv->maxchild>>10); i; i--){
+		if(so._poll(&fds, 1, 1000*CONNBACK_TO)!=1){
+			dolog(param, (unsigned char *)"Connect back not received, check connback client");
+			i = 0;
+			break;
+		}
 		param->remsock = so._accept(param->srv->cbsock, (struct sockaddr*)&param->sinsr, &size);
 		if(param->remsock == INVALID_SOCKET) {
-			param->res = 13;
-			param->srv->logfunc(param, (unsigned char *)"Connect back accept() failed");
+			dolog(param, (unsigned char *)"Connect back accept() failed");
 			continue;
+		}
+		{
+#ifdef _WIN32
+			unsigned long ul=1;
+			ioctlsocket(param->remsock, FIONBIO, &ul);
+#else
+			fcntl(param->remsock,F_SETFL,O_NONBLOCK | fcntl(param->remsock,F_GETFL));
+#endif
 		}
 #ifndef WITHMAIN
 		param->req = param->sinsr;
 		if(param->srv->acl) param->res = checkACL(param);
 		if(param->res){
-			param->srv->logfunc(param, (unsigned char *)"Connect back ACL failed");
+			dolog(param, (unsigned char *)"Connect back ACL failed");
 			so._closesocket(param->remsock);
 			param->remsock = INVALID_SOCKET;
 			continue;
 		}
 #endif
-		if(so._sendto(param->remsock, "C", 1, 0, (struct sockaddr*)&param->sinsr, size) != 1){
-			param->srv->logfunc(param, (unsigned char *)"Connect back sending command failed");
+		if(socksendto(param->remsock, (struct sockaddr*)&param->sinsr, (unsigned char *)"C", 1, CONNBACK_TO*1000) != 1){
+			dolog(param, (unsigned char *)"Connect back sending command failed");
 			so._closesocket(param->remsock);
 			param->remsock = INVALID_SOCKET;
 			continue;
@@ -46,10 +60,20 @@ void * threadfunc (void *p) {
 		break;
 	}
  }
- if(i == 3){
+ if(!i){
+	param->res = 13;
 	freeparam(param);
  }
  else {
+
+#ifndef WITHMAIN
+#ifndef _WIN32
+	sigset_t mask;
+	sigfillset(&mask);
+	if(param->srv->service != S_UDPPM)pthread_sigmask(SIG_SETMASK, &mask, NULL);
+#endif
+#endif
+
 	((struct clientparam *) p)->srv->pf((struct clientparam *)p);
  }
 #ifdef _WIN32
@@ -60,6 +84,76 @@ void * threadfunc (void *p) {
 }
 #undef param
 
+
+struct socketoptions sockopts[] = {
+#ifdef TCP_NODELAY
+	{TCP_NODELAY, "TCP_NODELAY"},
+#endif
+#ifdef TCP_CORK
+	{TCP_CORK, "TCP_CORK"},
+#endif
+#ifdef TCP_DEFER_ACCEPT
+	{TCP_DEFER_ACCEPT, "TCP_DEFER_ACCEPT"},
+#endif
+#ifdef TCP_QUICKACK
+	{TCP_QUICKACK, "TCP_QUICKACK"},
+#endif
+#ifdef TCP_TIMESTAMPS
+	{TCP_TIMESTAMPS, "TCP_TIMESTAMPS"},
+#endif
+#ifdef USE_TCP_FASTOPEN
+	{USE_TCP_FASTOPEN, "USE_TCP_FASTOPEN"},
+#endif
+#ifdef SO_REUSEADDR
+	{SO_REUSEADDR, "SO_REUSEADDR"},
+#endif
+#ifdef SO_REUSEPORT
+	{SO_REUSEPORT, "SO_REUSEPORT"},
+#endif
+#ifdef SO_PORT_SCALABILITY
+	{SO_PORT_SCALABILITY, "SO_PORT_SCALABILITY"},
+#endif
+#ifdef SO_REUSE_UNICASTPORT
+	{SO_REUSE_UNICASTPORT, "SO_REUSE_UNICASTPORT"},
+#endif
+#ifdef SO_KEEPALIVE
+	{SO_KEEPALIVE, "SO_KEEPALIVE"},
+#endif
+#ifdef SO_DONTROUTE
+	{SO_DONTROUTE, "SO_DONTROUTE"},
+#endif
+#ifdef IP_TRANSPARENT
+	{IP_TRANSPARENT, "IP_TRANSPARENT"},
+#endif
+	{0, NULL}
+};
+
+char optsbuf[1024];
+
+char * printopts(char *sep){
+	int i=0, pos=0;
+	for(; sockopts[i].optname; i++)pos += sprintf(optsbuf+pos,"%s%s",i?sep:"",sockopts[i].optname);
+	return optsbuf;
+}
+
+
+int getopts(const char *s){
+	int i=0, ret=0;
+	for(; sockopts[i].optname; i++)if(strstr(s,sockopts[i].optname)) ret |= (1<<i);
+	return ret;
+}
+
+void setopts(SOCKET s, int opts){
+	int i, opt, set;
+	for(i = 0; opts >= (opt = (1<<i)); i++){
+		set = 1;
+		if(opts & opt) setsockopt(s, *sockopts[i].optname == 'T'? IPPROTO_TCP:
+#ifdef SOL_IP
+			*sockopts[i].optname == 'I'? SOL_IP: 
+#endif
+			SOL_SOCKET, sockopts[i].opt, (char *)&set, sizeof(set));
+	}
+}
 
 
 #ifndef MODULEMAINFUNC
@@ -122,12 +216,20 @@ int MODULEMAINFUNC (int argc, char** argv){
 	" -u never ask for username\n"
 	" -u2 always ask for username\n"
 #endif
+#ifdef SO_BINDTODEVICE
+	" -Di(DEVICENAME) bind internal interface to device, e.g. eth1\n"
+	" -De(DEVICENAME) bind external interface to device, e.g. eth1\n"
+#endif
+#ifdef WITHSLICE
+	" -s Use slice() - faster proxing, but no filtering for data\n"
+#endif
 	" -fFORMAT logging format (see documentation)\n"
 	" -l log to stderr\n"
 	" -lFILENAME log to FILENAME\n"
 	" -b(BUFSIZE) size of network buffer (default 4096 for TCP, 16384 for UDP)\n"
 	" -S(STACKSIZE) value to add to default client thread stack size\n"
 	" -t be silent (do not log service start/stop)\n"
+	"\n"
 	" -iIP ip address or internal interface (clients are expected to connect)\n"
 	" -eIP ip address or external interface (outgoing connection will have this)\n"
 	" -rHOST:PORT Use IP:port for connect back proxy instead of listen port\n"
@@ -135,7 +237,11 @@ int MODULEMAINFUNC (int argc, char** argv){
 	" -4 Use IPv4 for outgoing connections\n"
 	" -6 Use IPv6 for outgoing connections\n"
 	" -46 Prefer IPv4 for outgoing connections, use both IPv4 and IPv6\n"
-	" -64 Prefer IPv6 for outgoing connections, use both IPv4 and IPv6\n";
+	" -64 Prefer IPv6 for outgoing connections, use both IPv4 and IPv6\n"
+	" -ocOPTIONS, -osOPTIONS, -olOPTIONS, -orOPTIONS -oROPTIONS - options for\n"
+	" to-client (oc), to-server (os), listening (ol) socket, connect back client\n"
+	" (or) socket, connect back server (oR) listening socket\n"
+	" where possible options are: ";
 
 #ifdef _WIN32
  unsigned long ul = 1;
@@ -171,12 +277,8 @@ int MODULEMAINFUNC (int argc, char** argv){
  WSADATA wd;
  WSAStartup(MAKEWORD( 1, 1 ), &wd);
 
-
-
-#else
- signal(SIGPIPE, SIG_IGN);
-
 #endif
+
 #endif
 
  srvinit(&srv, &defparam);
@@ -185,8 +287,15 @@ int MODULEMAINFUNC (int argc, char** argv){
  srv.service = defparam.service = childdef.service;
  
 #ifndef STDMAIN
- srv.acl = copyacl(conf.acl);
- srv.authfuncs = copyauth(conf.authfuncs);
+ if(conf.acl){
+	srv.acl = copyacl(conf.acl);
+	if(!srv.acl) haveerror = 2;
+ }
+
+ if(conf.authfuncs){
+	srv.authfuncs = copyauth(conf.authfuncs);
+	if(!srv.authfuncs) haveerror = 2;
+ }
  if(!conf.services){
 	conf.services = &srv;
  }
@@ -194,6 +303,13 @@ int MODULEMAINFUNC (int argc, char** argv){
 	srv.next = conf.services;
 	conf.services = conf.services->prev = &srv;
  }
+#ifndef _WIN32
+ {
+	sigset_t mask;
+	sigfillset(&mask);
+	pthread_sigmask(SIG_SETMASK, &mask, NULL);
+ }
+#endif
 #else
  srv.needuser = 0;
  pthread_mutex_init(&log_mutex, NULL);
@@ -206,6 +322,12 @@ int MODULEMAINFUNC (int argc, char** argv){
 			if(!conf.demon)daemonize();
 			conf.demon = 1;
 			break;
+#ifdef SO_BINDTODEVICE
+		 case 'D':
+			if(argv[i][2] == 'i') srv.ibindtodevice = mystrdup(argv[i] + 3);
+			else srv.obindtodevice = mystrdup(argv[i] + 3);
+			break;
+#endif
 		 case 'l':
 			srv.logfunc = logstdout;
 			if(srv.logtarget) myfree(srv.logtarget);
@@ -225,7 +347,6 @@ int MODULEMAINFUNC (int argc, char** argv){
 					fp = fopen(argv[i] + 2, "a");
 					if (fp) {
 						srv.stdlog = fp;
-						fseek(fp, 0L, SEEK_END);
 					}
 				}
 
@@ -248,6 +369,9 @@ int MODULEMAINFUNC (int argc, char** argv){
 				error = !getip46(46, (unsigned char *)argv[i]+2, (struct sockaddr *)&srv.extsa);
 #endif
 			}
+			break;
+		 case 'N':
+			getip46(46, (unsigned char *)argv[i]+2, (struct sockaddr *)&srv.extNat);
 			break;
 		 case 'p':
 			*SAPORT(&srv.intsa) = htons(atoi(argv[i]+2));
@@ -301,10 +425,40 @@ int MODULEMAINFUNC (int argc, char** argv){
 		 case 'S':
 			srv.stacksize = atoi(argv[i]+2);
 			break;
-		case 's':
 		case 'a':
-			srv.singlepacket = 1 + atoi(argv[i]+2);
+			srv.anonymous = 1 + atoi(argv[i]+2);
 			break;
+		case 's':
+#ifdef WITHSPLICE
+			if(isudp || srv.service == S_ADMIN)
+#endif
+				srv.singlepacket = 1 + atoi(argv[i]+2);
+#ifdef WITHSPLICE
+			else
+				if(*(argv[i]+2)) srv.usesplice = atoi(argv[i]+2);
+#endif
+			break;
+		 case 'o':
+			switch(argv[i][2]){
+			 case 's':
+				srv.srvsockopts = getopts(argv[i]+3);
+				break;
+			 case 'c':
+				srv.clisockopts = getopts(argv[i]+3);
+				break;
+			 case 'l':
+				srv.lissockopts = getopts(argv[i]+3);
+				break;
+			 case 'r':
+				srv.cbcsockopts = getopts(argv[i]+3);
+				break;
+			 case 'R':
+				srv.cbcsockopts = getopts(argv[i]+3);
+				break;
+			 default:
+				error = 1;
+			}
+			if(!error) break;
 		 default:
 			error = 1;
 			break;
@@ -323,17 +477,18 @@ int MODULEMAINFUNC (int argc, char** argv){
 		haveerror = 1;
 		conf.threadinit = 0;
 #endif
-		fprintf(stderr, "%s of " VERSION " (" BUILDDATE ")\n"
+		fprintf(stderr, "%s of %s\n"
 			"Usage: %s options\n"
 			"Available options are:\n"
-			"%s"
+			"%s\n"
+			"\t%s\n"
 			" -pPORT - service port to accept connections\n"
-			" -RIP:PORT - connect back IP:PORT to listen and accept connections\n"
-			" -rIP:PORT - connect back IP:PORT to establish connect back connection\n"
 			"%s"
 			"\tExample: %s -i127.0.0.1\n\n"
 			"%s", 
-			argv[0], argv[0], loghelp, childdef.helpmessage, argv[0],
+			argv[0], 
+			conf.stringtable?(char *)conf.stringtable[3]: VERSION " (" BUILDDATE ")",
+			argv[0], loghelp, printopts("\n\t"), childdef.helpmessage, argv[0],
 #ifdef STDMAIN
 			copyright
 #else
@@ -354,18 +509,19 @@ int MODULEMAINFUNC (int argc, char** argv){
 		haveerror = 1;
 		conf.threadinit = 0;
 #endif
-		fprintf(stderr, "%s of " VERSION " (" BUILDDATE ")\n"
+		fprintf(stderr, "%s of %s\n"
 			"Usage: %s options"
 			" [-e<external_ip>] <port_to_bind>"
 			" <target_hostname> <target_port>\n"
 			"Available options are:\n"
-			" -RIP:PORT - connect back IP:PORT to listen and accept connections\n"
-			" -rIP:PORT - connect back IP:PORT to establish connect back connection\n"
-			"%s"
+			"%s\n"
+			"\t%s\n"
 			"%s"
 			"\tExample: %s -d -i127.0.0.1 6666 serv.somehost.ru 6666\n\n"
 			"%s", 
-			argv[0], argv[0], loghelp, childdef.helpmessage, argv[0],
+			argv[0],
+			conf.stringtable?(char *)conf.stringtable[3]: VERSION " (" BUILDDATE ")",
+			argv[0], loghelp, printopts("\n\t"), childdef.helpmessage, argv[0],
 #ifdef STDMAIN
 			copyright
 #else
@@ -383,7 +539,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 
 #ifndef _WIN32
  if(inetd) {
-	fcntl(0,F_SETFL,O_NONBLOCK);
+	fcntl(0,F_SETFL,O_NONBLOCK | fcntl(0,F_GETFL));
 	if(!isudp){
 		so._setsockopt(0, SOL_SOCKET, SO_LINGER, (unsigned char *)&lg, sizeof(lg));
 		so._setsockopt(0, SOL_SOCKET, SO_OOBINLINE, (unsigned char *)&opt, sizeof(int));
@@ -437,10 +593,11 @@ int MODULEMAINFUNC (int argc, char** argv){
 			perror("socket()");
 			return -2;
 		}
+		setopts(sock, srv.lissockopts);
 #ifdef _WIN32
 		ioctlsocket(sock, FIONBIO, &ul);
 #else
-		fcntl(sock,F_SETFL,O_NONBLOCK);
+		fcntl(sock,F_SETFL,O_NONBLOCK | fcntl(sock,F_GETFL));
 #endif
 		srv.srvsock = sock;
 		opt = 1;
@@ -449,11 +606,14 @@ int MODULEMAINFUNC (int argc, char** argv){
 		opt = 1;
 		so._setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (char *)&opt, sizeof(int));
 #endif
+#ifdef SO_BINDTODEVICE
+		if(srv.ibindtodevice) so._setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, srv.ibindtodevice, strlen(srv.ibindtodevice) + 1);
+#endif
 	}
 	size = sizeof(srv.intsa);
 	for(sleeptime = SLEEPTIME * 100; so._bind(sock, (struct sockaddr*)&srv.intsa, SASIZE(&srv.intsa))==-1; usleep(sleeptime)) {
 		sprintf((char *)buf, "bind(): %s", strerror(errno));
-		if(!srv.silent)(*srv.logfunc)(&defparam, buf);	
+		if(!srv.silent)dolog(&defparam, buf);	
 		sleeptime = (sleeptime<<1);	
 		if(!sleeptime) {
 			so._closesocket(sock);
@@ -463,7 +623,7 @@ int MODULEMAINFUNC (int argc, char** argv){
  	if(!isudp){
  		if(so._listen (sock, 1 + (srv.maxchild>>4))==-1) {
 			sprintf((char *)buf, "listen(): %s", strerror(errno));
-			if(!srv.silent)(*srv.logfunc)(&defparam, buf);
+			if(!srv.silent)dolog(&defparam, buf);
 			return -4;
 		}
 	}
@@ -472,13 +632,13 @@ int MODULEMAINFUNC (int argc, char** argv){
 
 	if(!srv.silent && !iscbc){
 		sprintf((char *)buf, "Accepting connections [%u/%u]", (unsigned)getpid(), (unsigned)pthread_self());
-		(*srv.logfunc)(&defparam, buf);
+		dolog(&defparam, buf);
 	}
  }
  if(iscbl){
 	parsehost(srv.family, cbl_string, (struct sockaddr *)&cbsa);
 	if((srv.cbsock=so._socket(SASOCK(&cbsa), SOCK_STREAM, IPPROTO_TCP))==INVALID_SOCKET) {
-		(*srv.logfunc)(&defparam, (unsigned char *)"Failed to allocate connect back socket");
+		dolog(&defparam, (unsigned char *)"Failed to allocate connect back socket");
 		return -6;
 	}
 	opt = 1;
@@ -488,12 +648,14 @@ int MODULEMAINFUNC (int argc, char** argv){
 	so._setsockopt(srv.cbsock, SOL_SOCKET, SO_REUSEPORT, (char *)&opt, sizeof(int));
 #endif
 
+	setopts(srv.cbsock, srv.cbssockopts);
+
 	if(so._bind(srv.cbsock, (struct sockaddr*)&cbsa, SASIZE(&cbsa))==-1) {
-		(*srv.logfunc)(&defparam, (unsigned char *)"Failed to bind connect back socket");
+		dolog(&defparam, (unsigned char *)"Failed to bind connect back socket");
 		return -7;
 	}
 	if(so._listen(srv.cbsock, 1 + (srv.maxchild>>4))==-1) {
-		(*srv.logfunc)(&defparam, (unsigned char *)"Failed to listen connect back socket");
+		dolog(&defparam, (unsigned char *)"Failed to listen connect back socket");
 		return -8;
 	}
  }
@@ -503,7 +665,7 @@ int MODULEMAINFUNC (int argc, char** argv){
  
 #ifndef _WIN32
  pthread_attr_init(&pa);
- pthread_attr_setstacksize(&pa,PTHREAD_STACK_MIN + (16384 + srv.stacksize));
+ pthread_attr_setstacksize(&pa,PTHREAD_STACK_MIN + (32768 + srv.stacksize));
  pthread_attr_setdetachstate(&pa,PTHREAD_CREATE_DETACHED);
 #endif
 
@@ -513,7 +675,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 			nlog++;			
 			if(!srv.silent && nlog > 5000) {
 				sprintf((char *)buf, "Warning: too many connected clients (%d/%d)", srv.childcount, srv.maxchild);
-				(*srv.logfunc)(&defparam, buf);
+				dolog(&defparam, buf);
 				nlog = 0;
 			}
 			usleep(SLEEPTIME);
@@ -531,7 +693,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 		if (error == 0) continue;
 		if (errno != EAGAIN &&	errno != EINTR) {
 			sprintf((char *)buf, "poll(): %s/%d", strerror(errno), errno);
-			if(!srv.silent)(*srv.logfunc)(&defparam, buf);
+			if(!srv.silent)dolog(&defparam, buf);
 			break;
 		}
 	}
@@ -542,14 +704,17 @@ int MODULEMAINFUNC (int argc, char** argv){
 		if(iscbc){
 			new_sock=so._socket(SASOCK(&defparam.sincr), SOCK_STREAM, IPPROTO_TCP);
 			if(new_sock != INVALID_SOCKET){
+				setopts(new_sock, srv.cbcsockopts);
+
 				parsehost(srv.family, cbc_string, (struct sockaddr *)&defparam.sincr);
-				if(so._connect(new_sock,(struct sockaddr *)&defparam.sincr,SASIZE(&defparam.sincr))) {
+				if(connectwithpoll(new_sock,(struct sockaddr *)&defparam.sincr,SASIZE(&defparam.sincr),CONNBACK_TO)) {
 					so._closesocket(new_sock);
 					new_sock = INVALID_SOCKET;
 					usleep(SLEEPTIME);
 					continue;
 				}
-				if(so._recvfrom(new_sock,(char *)buf,1,0,(struct sockaddr*)&defparam.sincr, &size) != 1) {
+
+				if(sockrecvfrom(new_sock,(struct sockaddr*)&defparam.sincr,buf,1,60*1000) != 1 || *buf!='C') {
 					so._closesocket(new_sock);
 					new_sock = INVALID_SOCKET;
 					usleep(SLEEPTIME);
@@ -602,22 +767,23 @@ int MODULEMAINFUNC (int argc, char** argv){
 				nlog++;			
 				if(!srv.silent && (error || nlog > 5000)) {
 					sprintf((char *)buf, "accept(): %s", strerror(errno));
-					(*srv.logfunc)(&defparam, buf);
+					dolog(&defparam, buf);
 					nlog = 0;
 				}
 				continue;
 			}
+			setopts(new_sock, srv.clisockopts);
 		}
 		size = sizeof(defparam.sincl);
 		if(so._getsockname(new_sock, (struct sockaddr *)&defparam.sincl, &size)){
 			sprintf((char *)buf, "getsockname(): %s", strerror(errno));
-			if(!srv.silent)(*srv.logfunc)(&defparam, buf);
+			if(!srv.silent)dolog(&defparam, buf);
 			continue;
 		}
 #ifdef _WIN32
 		ioctlsocket(new_sock, FIONBIO, &ul);
 #else
-		fcntl(new_sock,F_SETFL,O_NONBLOCK);
+		fcntl(new_sock,F_SETFL,O_NONBLOCK | fcntl(new_sock,F_GETFL));
 #endif
 		so._setsockopt(new_sock, SOL_SOCKET, SO_LINGER, (char *)&lg, sizeof(lg));
 		so._setsockopt(new_sock, SOL_SOCKET, SO_OOBINLINE, (char *)&opt, sizeof(int));
@@ -628,7 +794,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 	if(! (newparam = myalloc (sizeof(defparam)))){
 		if(!isudp) so._closesocket(new_sock);
 		defparam.res = 21;
-		if(!srv.silent)(*srv.logfunc)(&defparam, (unsigned char *)"Memory Allocation Failed");
+		if(!srv.silent)dolog(&defparam, (unsigned char *)"Memory Allocation Failed");
 		usleep(SLEEPTIME);
 		continue;
 	};
@@ -665,7 +831,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 	}
 	else {
 		sprintf((char *)buf, "_beginthreadex(): %s", _strerror(NULL));
-		if(!srv.silent)(*srv.logfunc)(&defparam, buf);
+		if(!srv.silent)dolog(&defparam, buf);
 		error = 1;
 	}
 #else
@@ -674,7 +840,7 @@ int MODULEMAINFUNC (int argc, char** argv){
 	srv.childcount++;
 	if(error){
 		sprintf((char *)buf, "pthread_create(): %s", strerror(error));
-		if(!srv.silent)(*srv.logfunc)(&defparam, buf);
+		if(!srv.silent)dolog(&defparam, buf);
 	}
 	else {
 		newparam->threadid = (unsigned)thread;
@@ -689,7 +855,6 @@ int MODULEMAINFUNC (int argc, char** argv){
  }
 
  if(!srv.silent) srv.logfunc(&defparam, (unsigned char *)"Exiting thread");
- if(fp) fclose(fp);
 
  srvfree(&srv);
 
@@ -707,6 +872,7 @@ int MODULEMAINFUNC (int argc, char** argv){
  if(defparam.hostname)myfree(defparam.hostname);
  if(cbc_string)myfree(cbc_string);
  if(cbl_string)myfree(cbl_string);
+ if(fp) fclose(fp);
 
  return 0;
 }
@@ -717,17 +883,15 @@ void srvinit(struct srvparam * srv, struct clientparam *param){
  memset(srv, 0, sizeof(struct srvparam));
  srv->version = conf.version + 1;
  srv->paused = conf.paused;
- srv->logfunc = conf.logfunc;
+ srv->logfunc = havelog?conf.logfunc:lognone;
  srv->noforce = conf.noforce;
- if(srv->logformat)myfree(srv->logformat);
  srv->logformat = conf.logformat? (unsigned char *)mystrdup((char *)conf.logformat) : NULL;
  srv->authfunc = conf.authfunc;
  srv->usentlm = 0;
  srv->maxchild = conf.maxchild;
  srv->stacksize = conf.stacksize;
  srv->time_start = time(NULL);
- if(conf.logtarget){
-	 if(srv->logtarget) myfree(srv->logtarget);
+ if(havelog && conf.logtarget){
 	 srv->logtarget = (unsigned char *)mystrdup((char *)conf.logtarget);
  }
  srv->srvsock = INVALID_SOCKET;
@@ -735,6 +899,9 @@ void srvinit(struct srvparam * srv, struct clientparam *param){
  srv->logdumpcli = conf.logdumpcli;
  srv->cbsock = INVALID_SOCKET; 
  srv->needuser = 1;
+#ifdef WITHSPLICE
+ srv->usesplice = 1;
+#endif
  memset(param, 0, sizeof(struct clientparam));
  param->srv = srv;
  param->version = srv->version;
@@ -803,6 +970,10 @@ void srvfree(struct srvparam * srv){
  if(srv->logtarget) myfree(srv->logtarget);
  if(srv->logformat) myfree(srv->logformat);
  if(srv->nonprintable) myfree(srv->nonprintable);
+#ifdef SO_BINDTODEVICE
+ if(srv->ibindtodevice) myfree(srv->ibindtodevice);
+ if(srv->obindtodevice) myfree(srv->obindtodevice);
+#endif
 }
 
 
@@ -822,6 +993,7 @@ void freeparam(struct clientparam * param) {
 		}
 		myfree(param->filters);
 	}
+	if(conf.connlimiter && (param->res != 95 || param->remsock != INVALID_SOCKET)) stopconnlims(param);
 #endif
 	if(param->clibuf) myfree(param->clibuf);
 	if(param->srvbuf) myfree(param->srvbuf);
@@ -876,8 +1048,17 @@ static void * itcopy (void * from, size_t size){
 struct auth * copyauth (struct auth * authfuncs){
 	struct auth * newauth = NULL;
 
- 	newauth = authfuncs = itcopy(authfuncs, sizeof(struct auth));
-	for( ; authfuncs; authfuncs = authfuncs->next = itcopy(authfuncs->next, sizeof(struct auth)));
+ 	newauth = itcopy(authfuncs, sizeof(struct auth));
+	for( authfuncs=newauth; authfuncs; authfuncs = authfuncs->next){
+		if(authfuncs->next){
+			authfuncs->next = itcopy(authfuncs->next, sizeof(struct auth));
+			if(!authfuncs->next)break;
+		}
+	}
+	if(authfuncs){
+		freeauth(newauth);
+		return NULL;
+	}
 	return newauth;
 }
 
@@ -890,31 +1071,133 @@ struct ace * copyacl (struct ace *ac){
  struct period *pel;
  struct hostname *hst;
 
- ret = ac = itcopy(ac, sizeof(struct ace));
- for( ; ac; ac = ac->next = itcopy(ac->next, sizeof(struct ace))){
-	ac->src = itcopy(ac->src, sizeof(struct iplist));
-	for(ipl = ac->src; ipl; ipl = ipl->next = itcopy(ipl->next, sizeof(struct iplist)));
-	ac->dst = itcopy(ac->dst, sizeof(struct iplist));
-	for(ipl = ac->dst; ipl; ipl = ipl->next = itcopy(ipl->next, sizeof(struct iplist)));
-	ac->ports = itcopy(ac->ports, sizeof(struct portlist));
-	for(pl = ac->ports; pl; pl = pl->next = itcopy(pl->next, sizeof(struct portlist)));
-	ac->periods = itcopy(ac->periods, sizeof(struct period));
-	for(pel = ac->periods; pel; pel = pel->next = itcopy(pel->next, sizeof(struct period)));
-	ac->users = itcopy(ac->users, sizeof(struct userlist));
-	for(ul = ac->users; ul; ul = ul->next = itcopy(ul->next, sizeof(struct userlist))){
-		if(ul->user) ul->user = (unsigned char*)mystrdup((char *)ul->user);
+ ret = itcopy(ac, sizeof(struct ace));
+ for( ac = ret; ac; ac = ac->next){
+	if(ac->src){
+		ac->src = itcopy(ac->src, sizeof(struct iplist));
+		if(!ac->src) goto ERRORSRC;
+		for(ipl = ac->src; ipl->next; ipl = ipl->next){
+			ipl->next = itcopy(ipl->next, sizeof(struct iplist));
+			if(!ipl->next) goto ERRORSRC;
+		}
 	}
-	ac->dstnames = itcopy(ac->dstnames, sizeof(struct hostname));
-	for(hst = ac->dstnames; hst; hst = hst->next = itcopy(hst->next, sizeof(struct hostname))){
-		if(hst->name) hst->name = (unsigned char*)mystrdup((char *)hst->name);
+	if(ac->dst){
+		ac->dst = itcopy(ac->dst, sizeof(struct iplist));
+		if(!ac->dst) goto ERRORDST;
+		for(ipl = ac->dst; ipl->next; ipl = ipl->next){
+			ipl->next = itcopy(ipl->next, sizeof(struct iplist));
+			if(!ipl->next) goto ERRORDST;
+		}
 	}
-	ac->chains = itcopy(ac->chains, sizeof(struct chain));
-	for(ch = ac->chains; ch; ch = ch->next = itcopy(ch->next, sizeof(struct chain))){
-		if(ch->extuser)ch->extuser = (unsigned char*)mystrdup((char *)ch->extuser);
-		if(ch->extpass)ch->extpass = (unsigned char*)mystrdup((char *)ch->extpass);
+	if(ac->ports){
+		ac->ports = itcopy(ac->ports, sizeof(struct portlist));
+		if(!ac->ports) goto ERRORPORTS;
+		for(pl = ac->ports; pl->next; pl = pl->next){
+			pl->next = itcopy(pl->next, sizeof(struct portlist));
+			if(!pl->next) goto ERRORPORTS;
+		}
+	}
+	if(ac->periods){
+		ac->periods = itcopy(ac->periods, sizeof(struct period));
+		if(!ac->periods) goto ERRORPERIODS;
+		for(pel = ac->periods; pel->next; pel = pel->next){
+			pel->next = itcopy(pel->next, sizeof(struct period));
+			if(!pel->next) goto ERRORPERIODS;
+		}
+	}
+	if(ac->users){
+		ac->users = itcopy(ac->users, sizeof(struct userlist));
+		if(!ac->users) goto ERRORUSERS;
+		for(ul = ac->users; ul; ul = ul->next){
+			if(ul->user) {
+				ul->user = (unsigned char*)mystrdup((char *)ul->user);
+				if(!ul->user) {
+					ul->next = NULL;
+					goto ERRORUSERS;
+				}
+			}
+			if(ul->next){
+				ul->next = itcopy(ul->next, sizeof(struct userlist));
+				if(!ul->next) goto ERRORUSERS;
+			}
+		}
+	}
+	if(ac->dstnames){
+		ac->dstnames = itcopy(ac->dstnames, sizeof(struct hostname));
+		if(!ac->dstnames) goto ERRORDSTNAMES;
+		for(hst = ac->dstnames; hst; hst = hst->next){
+			if(hst->name) {
+				hst->name = (unsigned char*)mystrdup((char *)hst->name);
+				if(!hst->name) {
+					hst->next = NULL;
+					goto ERRORDSTNAMES;
+				}
+			}
+			if(hst->next){
+				hst->next = itcopy(hst->next, sizeof(struct hostname));
+				if(!hst->next) goto ERRORDSTNAMES;
+			}
+		}
+	}
+	if(ac->chains){
+		ac->chains = itcopy(ac->chains, sizeof(struct chain));
+		if(!ac->chains) goto ERRORCHAINS;
+		for(ch = ac->chains; ch; ch = ch->next){
+			if(ch->extuser){
+				ch->extuser = (unsigned char*)mystrdup((char *)ch->extuser);
+				if(!ch->extuser){
+					ch->extpass = NULL;
+					ch->exthost = NULL;
+					ch->next = NULL;
+					goto ERRORCHAINS;
+				}
+			}
+			if(ch->extpass){
+				ch->extpass = (unsigned char*)mystrdup((char *)ch->extpass);
+				if(!ch->extpass){
+					ch->exthost = NULL;
+					ch->next = NULL;
+					goto ERRORCHAINS;
+				}
+			}
+			if(ch->exthost){
+				ch->exthost = (unsigned char*)mystrdup((char *)ch->exthost);
+				if(!ch->exthost){
+					ch->next = NULL;
+					goto ERRORCHAINS;
+				}
+
+			}
+			if(ch->next){
+				ch->next = itcopy(ch->next, sizeof(struct chain));
+				if(!ch->next) goto ERRORNEXT;
+			}
+		}
+	}
+	if(ac->next){
+		ac->next = itcopy(ac->next, sizeof(struct ace));
+		if(!ac->next) goto ERRORCHAINS;
 	}
  }
- return ret;
+ if(!ac) return ret;
+ERRORSRC:
+	ac->dst	= NULL;
+ERRORDST:
+	ac->ports = NULL;
+ERRORPORTS:
+	ac->periods = NULL;
+ERRORPERIODS:
+	ac->users = NULL;
+ERRORUSERS:
+	ac->dstnames = NULL;
+ERRORDSTNAMES:
+	ac->chains = NULL;
+ERRORCHAINS:
+	ac->next = NULL;
+ERRORNEXT:
+	freeacl(ret);
+	return NULL;
+
 }
 
 
@@ -1010,6 +1293,7 @@ void freeacl(struct ace *ac){
 		for(ch = ac->chains; ch; ch = (struct chain *) itfree(ch, ch->next)){
 			if(ch->extuser) myfree(ch->extuser);
 			if(ch->extpass) myfree(ch->extpass);
+			if(ch->exthost) myfree(ch->exthost);
 		}
 	}
 }

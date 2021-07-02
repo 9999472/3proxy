@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -140,7 +140,7 @@ void * dnsprchild(struct clientparam* param) {
 	}
 	param->sinsr = nservers[0].addr;
 	if(nservers[0].usetcp) {
-		if(so._connect(param->remsock,(struct sockaddr *)&param->sinsr,SASIZE(&param->sinsr))) RETURN(830);
+		if(connectwithpoll(param->remsock,(struct sockaddr *)&param->sinsr,SASIZE(&param->sinsr),CONNECT_TO)) RETURN(830);
 		buf-=2;
 		*(unsigned short*)buf = htons(i);
 		i+=2;
@@ -198,7 +198,7 @@ CLEANRET:
 	if((ip && type == 0x01) || type == 0x1c){
 		myinet_ntop(type == 0x01? AF_INET:AF_INET6, addr, (char *)buf+strlen((char *)buf), 64);
 	}
-	(*param->srv->logfunc)(param, buf);
+	dolog(param, buf);
  }
  if(bbuf)myfree(bbuf);
  if(host)myfree(host);

@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -153,7 +153,7 @@ void * ftpprchild(struct clientparam* param) {
 
 			if(sscanf((char *)buf+5, "%lu,%lu,%lu,%lu,%hu,%hu", &b1, &b2, &b3, &b4, &b5, &b6)!=6) {RETURN(828);}
 			*SAPORT(&param->sincr) = htons((unsigned short)((b5<<8)^b6));
-			if(so._connect(clidatasock, (struct sockaddr *)&param->sincr, SASIZE(&param->sincr))) {
+			if(connectwithpoll(clidatasock, (struct sockaddr *)&param->sincr, SASIZE(&param->sincr),CONNECT_TO)) {
 				so._closesocket(clidatasock);
 				clidatasock = INVALID_SOCKET;
 				RETURN(826);
@@ -250,7 +250,7 @@ void * ftpprchild(struct clientparam* param) {
 		so._setsockopt(param->remsock, SOL_SOCKET, SO_LINGER, (char *)&lg, sizeof(lg));
 		so._setsockopt(clidatasock, SOL_SOCKET, SO_LINGER, (char *)&lg, sizeof(lg));
 		param->clisock = clidatasock;
-		res = sockmap(param, conf.timeouts[CONNECTION_S]);
+		res = mapsocket(param, conf.timeouts[CONNECTION_S]);
 		if(param->remsock != INVALID_SOCKET) {
 			so._shutdown (param->remsock, SHUT_RDWR);
 			so._closesocket(param->remsock);
@@ -295,7 +295,7 @@ void * ftpprchild(struct clientparam* param) {
 	sasize = sizeof(param->sincr);
 	if(so._getpeername(param->ctrlsock, (struct sockaddr *)&param->sincr, &sasize)){RETURN(819);}
 	if(req && (param->statscli64 || param->statssrv64)){
-		(*param->srv->logfunc)(param, (unsigned char *)req);
+		dolog(param, (unsigned char *)req);
 	}
  }
 
@@ -316,7 +316,7 @@ CLEANRET:
  sasize = sizeof(param->sincr);
  so._getpeername(param->ctrlsock, (struct sockaddr *)&param->sincr, &sasize);
  if(param->res != 0 || param->statscli64 || param->statssrv64 ){
-	(*param->srv->logfunc)(param, (unsigned char *)((req && (param->res > 802))? req:NULL));
+	dolog(param, (unsigned char *)((req && (param->res > 802))? req:NULL));
  }
  if(req) myfree(req);
  if(buf) myfree(buf);

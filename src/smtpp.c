@@ -1,6 +1,6 @@
 /*
    3APA3A simpliest proxy server
-   (c) 2002-2008 by ZARAZA <3APA3A@security.nnov.ru>
+   (c) 2002-2021 by Vladimir Dubrovin <3proxy@3proxy.org>
 
    please read License Agreement
 
@@ -272,7 +272,7 @@ void * smtppchild(struct clientparam* param) {
 
  if(param->nhdrfilterscli || param->nhdrfilterssrv || param->ndatfilterscli || param->ndatfilterssrv){
 	do {
-		if(res == 22) RETURN (sockmap(param, 180));
+		if(res == 22) RETURN (mapsocket(param, 180));
 		if(res != 2 && (res = readreply(param)) <= 0) break;
 		if(res == 221) RETURN(0);
 		if(res == 354) res = readdata(param);
@@ -286,15 +286,15 @@ void * smtppchild(struct clientparam* param) {
 
 #endif
  
- 	RETURN (sockmap(param, 180));
+ 	RETURN (mapsocket(param, 180));
 
 CLEANRET:
 
  if(param->hostname&&param->extusername) {
 	sprintf((char *)buf, "%.128s@%.128s%c%hu", param->extusername, param->hostname, *SAPORT(&param->sinsr)==25?0:':',ntohs(*SAPORT(&param->sinsr)));
-	 (*param->srv->logfunc)(param, buf);
+	 dolog(param, buf);
  }
- else (*param->srv->logfunc)(param, NULL);
+ else dolog(param, NULL);
  if(param->clisock != INVALID_SOCKET) {
 	if ((param->res > 0 && param->res < 100) || (param->res > 661 && param->res <700)) socksend(param->clisock, (unsigned char *)"571 \r\n", 6,conf.timeouts[STRING_S]);
  }
